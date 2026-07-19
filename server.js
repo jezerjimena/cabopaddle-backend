@@ -9,7 +9,7 @@ app.use(express.json());
 
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
 const PAYPAL_SECRET = process.env.PAYPAL_SECRET;
-const PAYPAL_API = 'https://api-m.sandbox.paypal.com'; // Sandbox (pruebas)
+const PAYPAL_API = 'https://api-m.paypal.com'; // Sandbox (pruebas)
 
 // 1. Obtener token de acceso de PayPal
 async function getAccessToken() {
