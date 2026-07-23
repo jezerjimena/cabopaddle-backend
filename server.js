@@ -14,7 +14,8 @@ const PAYPAL_API = 'https://api-m.paypal.com';
 
 // ── Correo (Gmail con contraseña de aplicación) ──────────────────
 const EMAIL_USER = process.env.EMAIL_USER;
-const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
+// Se eliminan espacios por si la contraseña de aplicación se pegó como "xxxx xxxx xxxx xxxx"
+const EMAIL_APP_PASSWORD = (process.env.EMAIL_APP_PASSWORD || '').replace(/\s+/g, '') || undefined;
 const EMAIL_DESTINO = process.env.EMAIL_DESTINO || EMAIL_USER;
 
 const transporter = (EMAIL_USER && EMAIL_APP_PASSWORD)
