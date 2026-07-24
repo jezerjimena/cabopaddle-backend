@@ -71,6 +71,12 @@ async function enviarCorreoReserva(reserva, captureData) {
         ${fila('Correo PayPal', pagador.email_address)}
       </table>
 
+      <div style="margin:18px 26px;padding:14px 16px;background:#F4EBDC;border-radius:10px;">
+        <p style="margin:0;color:#16323D;font-size:13px;line-height:1.6;">
+          💡 <strong>Recuerda enviarle al cliente:</strong> las fotos del tour por WhatsApp, el enlace para dejar reseña en Google,
+          y este mensaje de recompra: <em>"¿Vuelves a Cabo? Tu próximo tour con 20% off — guarda este correo."</em>
+        </p>
+      </div>
       <p style="margin:18px 26px 24px;color:#8CA0A6;font-size:12px;line-height:1.6;">
         Este correo se generó automáticamente cuando el cliente completó su pago con PayPal.
         Puedes responder directamente a este correo para contactar al cliente.
