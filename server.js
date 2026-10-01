@@ -93,6 +93,73 @@ async function enviarCorreoReserva(reserva, captureData) {
   });
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   PRECIOS — esta tabla TIENE que decir lo mismo que booking.js del sitio
+   ───────────────────────────────────────────────────────────────────────────
+   Antes el navegador le decía al servidor cuánto cobrar y el servidor le
+   creía. Eso significaba que cualquiera con un poco de conocimiento podía
+   abrir las herramientas del navegador y apartar una salida de $8,900
+   pagando un anticipo de $1 peso.
+
+   Ahora el precio lo calcula el servidor. El navegador solo dice QUÉ se
+   reserva y CUÁNTOS van; el monto lo pone esta tabla.
+
+   SI CAMBIAS UN PRECIO: cámbialo aquí Y en booking.js del sitio. Son dos
+   archivos en dos servidores distintos y tienen que coincidir. Si se
+   desincronizan, el servidor lo avisa en los registros de Render.
+   ═══════════════════════════════════════════════════════════════════════════ */
+const ANTICIPO = 0.4;
+
+const PAQUETES = {
+  tour:       { adulto: 890, nino: 500, min: 2, max: 10, nombre: 'Tour Privado al Arco' },
+  yoga:       { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Yoga en Paddle' },
+  meditacion: { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Meditación Guiada' },
+  tarot:      { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Tarot a la Orilla' }
+};
+
+// Nombres de planes que ya no existen, por si alguien reserva desde un
+// enlace viejo que todavía ande circulando por WhatsApp.
+const ALIAS = {
+  esencial: 'tour', pareja: 'tour', amigos: 'tour',
+  completa: 'tour', familiar: 'tour'
+};
+
+function cotizar(paqueteId, adultos, ninos) {
+  const p = PAQUETES[ALIAS[paqueteId] || paqueteId];
+  if (!p) return { error: 'Ese paquete no existe' };
+
+  adultos = parseInt(adultos, 10) || 0;
+  ninos = parseInt(ninos, 10) || 0;
+  const personas = adultos + ninos;
+
+  if (personas < p.min) return { error: `${p.nombre} sale desde ${p.min} persona(s)` };
+  if (personas > p.max) return { error: `${p.nombre} admite hasta ${p.max} personas` };
+
+  const total = adultos * p.adulto + ninos * p.nino;
+  return {
+    nombre: p.nombre, adultos, ninos, total,
+    anticipo: Math.round(total * ANTICIPO)
+  };
+}
+
+/* Todos los anticipos que pueden salir legítimamente de la tabla de arriba.
+   Sirve para las páginas que quedaron guardadas en el navegador de alguien
+   y todavía mandan el total ya calculado: si el número que llega no está en
+   esta lista, es que lo manipularon y se rechaza. */
+const ANTICIPOS_VALIDOS = (() => {
+  const set = new Set();
+  for (const id of Object.keys(PAQUETES)) {
+    const p = PAQUETES[id];
+    for (let a = 0; a <= p.max; a++) {
+      for (let n = 0; a + n <= p.max; n++) {
+        if (a + n < p.min) continue;
+        set.add(Math.round((a * p.adulto + n * p.nino) * ANTICIPO));
+      }
+    }
+  }
+  return set;
+})();
+
 // 1. Obtener token de acceso de PayPal
 async function getAccessToken() {
   const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_SECRET}`).toString('base64');
@@ -110,7 +177,38 @@ async function getAccessToken() {
 
 // 2. Ruta para crear una orden (cuando el cliente hace clic en "Pagar")
 app.post('/api/crear-orden', async (req, res) => {
-  const { total, descripcion } = req.body; // recibe total y descripción desde el frontend
+  const { paquete, adultos, ninos, total, descripcion } = req.body;
+
+  let monto, detalle;
+
+  if (paquete) {
+    // Camino normal: el servidor calcula el precio. El navegador no decide.
+    const c = cotizar(paquete, adultos, ninos);
+    if (c.error) {
+      console.warn('Reserva rechazada:', c.error, req.body);
+      return res.status(400).json({ error: c.error });
+    }
+    monto = c.anticipo;
+    detalle = `Anticipo 40% — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
+
+    // Si el sitio mandó también su propia cuenta y no coincide, es que las
+    // dos tablas de precios se desincronizaron. Se cobra la del servidor,
+    // pero queda el aviso en los registros de Render para corregirlo.
+    if (typeof total === 'number' && Math.round(total) !== monto) {
+      console.warn(`PRECIOS DESINCRONIZADOS: el sitio dice ${total} y el servidor ${monto}. ` +
+                   `Revisa que booking.js y server.js tengan los mismos precios.`);
+    }
+  } else if (typeof total === 'number' && ANTICIPOS_VALIDOS.has(Math.round(total))) {
+    // Camino de respaldo: alguien tiene la página vieja guardada en su
+    // navegador y todavía manda el total ya hecho. Se acepta solo si ese
+    // número de verdad puede salir de la tabla de precios.
+    monto = Math.round(total);
+    detalle = descripcion || 'Anticipo 40% — cabopaddle';
+  } else {
+    console.warn('Intento de orden con datos inválidos:', req.body);
+    return res.status(400).json({ error: 'Datos de la reserva no válidos' });
+  }
+
   try {
     const accessToken = await getAccessToken();
     const order = await axios({
@@ -123,10 +221,10 @@ app.post('/api/crear-orden', async (req, res) => {
       data: {
         intent: 'CAPTURE',
         purchase_units: [{
-          description: descripcion,
+          description: detalle,
           amount: {
             currency_code: 'MXN',
-            value: total.toFixed(2)
+            value: monto.toFixed(2)
           }
         }]
       }
@@ -143,6 +241,22 @@ app.post('/api/capturar-orden', async (req, res) => {
   const { orderID, reserva } = req.body;
   try {
     const accessToken = await getAccessToken();
+
+    /* Antes de cobrar, se revisa en PayPal cuánto dice esa orden. Si el monto
+       no es uno de los que puede salir de la tabla de precios, no se cobra:
+       significa que la orden se creó por fuera de la página. */
+    const orden = await axios({
+      url: `${PAYPAL_API}/v2/checkout/orders/${orderID}`,
+      method: 'get',
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+    const valorOrden = Math.round(Number(orden.data?.purchase_units?.[0]?.amount?.value));
+    if (!ANTICIPOS_VALIDOS.has(valorOrden)) {
+      console.warn(`Captura rechazada: la orden ${orderID} vale ${valorOrden}, ` +
+                   `que no corresponde a ninguna reserva posible.`);
+      return res.status(400).json({ error: 'El monto de la orden no es válido' });
+    }
+
     const capture = await axios({
       url: `${PAYPAL_API}/v2/checkout/orders/${orderID}/capture`,
       method: 'post',
