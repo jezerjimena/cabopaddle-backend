@@ -63,8 +63,9 @@ async function enviarCorreoReserva(reserva, captureData) {
 
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">💳 Datos del pago</p>
       <table style="width:100%;border-collapse:collapse;">
-        ${fila('Anticipo pagado (40%)', monto)}
-        ${fila('Resto por cobrar el día del tour', reserva.resto)}
+        ${fila(reserva.pagoCompleto ? 'PAGÓ TODO por adelantado' : 'Anticipo pagado (40%)', monto)}
+        ${fila('Resto por cobrar el día del tour',
+               reserva.pagoCompleto ? 'Nada — ya está liquidado' : reserva.resto)}
         ${fila('Estado', pago.status || captureData.status)}
         ${fila('ID de transacción', pago.id)}
         ${fila('Pagador (PayPal)', nombrePagador)}
@@ -151,7 +152,9 @@ function cotizar(paqueteId, adultos, ninos) {
   };
 }
 
-/* Todos los anticipos que pueden salir legítimamente de la tabla de arriba.
+/* Todos los montos que pueden salir legítimamente de la tabla de arriba:
+   tanto los anticipos del 40% como los pagos completos, porque el cliente
+   puede elegir cualquiera de los dos en la página de reservas.
    Sirve para las páginas que quedaron guardadas en el navegador de alguien
    y todavía mandan el total ya calculado: si el número que llega no está en
    esta lista, es que lo manipularon y se rechaza. */
@@ -162,7 +165,9 @@ const ANTICIPOS_VALIDOS = (() => {
     for (let a = 0; a <= p.max; a++) {
       for (let n = 0; a + n <= p.max; n++) {
         if (a + n < p.min) continue;
-        set.add(Math.round((a * p.adulto + n * p.nino) * ANTICIPO));
+        const total = a * p.adulto + n * p.nino;
+        set.add(Math.round(total * ANTICIPO));   // pagó solo el anticipo
+        set.add(total);                          // pagó todo de una vez
       }
     }
   }
@@ -186,7 +191,7 @@ async function getAccessToken() {
 
 // 2. Ruta para crear una orden (cuando el cliente hace clic en "Pagar")
 app.post('/api/crear-orden', async (req, res) => {
-  const { paquete, adultos, ninos, total, descripcion } = req.body;
+  const { paquete, adultos, ninos, pagoCompleto, total, descripcion } = req.body;
 
   let monto, detalle;
 
@@ -197,14 +202,21 @@ app.post('/api/crear-orden', async (req, res) => {
       console.warn('Reserva rechazada:', c.error, req.body);
       return res.status(400).json({ error: c.error });
     }
-    monto = c.anticipo;
-    detalle = `Anticipo 40% — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
+
+    /* El cliente elige en la página si paga todo o solo el anticipo. Eso es
+       lo único que decide: CUÁL de los dos montos, nunca cuánto valen.
+       Los dos los calcula el servidor con su propia tabla. */
+    const todo = pagoCompleto === true;
+    monto = todo ? c.total : c.anticipo;
+    detalle = `${todo ? 'Pago completo' : 'Anticipo 40%'} — ${c.nombre} · ` +
+              `${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
 
     // Si el sitio mandó también su propia cuenta y no coincide, es que las
     // dos tablas de precios se desincronizaron. Se cobra la del servidor,
     // pero queda el aviso en los registros de Render para corregirlo.
     if (typeof total === 'number' && Math.round(total) !== monto) {
-      console.warn(`PRECIOS DESINCRONIZADOS: el sitio dice ${total} y el servidor ${monto}. ` +
+      console.warn(`PRECIOS DESINCRONIZADOS: el sitio dice ${total} y el servidor ${monto} ` +
+                   `(${todo ? 'pago completo' : 'anticipo'}). ` +
                    `Revisa que booking.js y server.js tengan los mismos precios.`);
     }
   } else if (typeof total === 'number' && ANTICIPOS_VALIDOS.has(Math.round(total))) {
