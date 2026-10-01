@@ -59,6 +59,7 @@ async function enviarCorreoReserva(reserva, captureData) {
         ${fila('Correo del cliente', reserva.email)}
         ${fila('Teléfono / WhatsApp', reserva.telefono)}
         ${fila('Total del tour', reserva.total)}
+        ${fila('Fotos del recorrido', reserva.fotos || 'No las pidió')}
       </table>
 
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">💳 Datos del pago</p>
@@ -118,6 +119,11 @@ const ANTICIPO = 0.4;
    sitio. Si no coinciden, el servidor avisa en los registros de Render. */
 const DESCUENTO_CONTADO = 0.05;
 
+/* Extra opcional: las fotos del recorrido. Se cobra POR SALIDA, una sola
+   vez, lleven dos personas o lleven diez. Tiene que ser el mismo numero
+   que EXTRAS.fotos.mxn en booking.js del sitio. */
+const EXTRA_FOTOS = 100;
+
 /* Las tres opciones de tour (tour, familia, grupo6) cobran EXACTAMENTE lo
    mismo. Son la misma salida: lo único que cambia en la página es con
    cuántas personas arranca el formulario. Por eso tienen precios idénticos
@@ -141,7 +147,7 @@ const ALIAS = {
   completa: 'tour', familiar: 'familia'
 };
 
-function cotizar(paqueteId, adultos, ninos) {
+function cotizar(paqueteId, adultos, ninos, conFotos) {
   const p = PAQUETES[ALIAS[paqueteId] || paqueteId];
   if (!p) return { error: 'Ese paquete no existe' };
 
@@ -152,7 +158,9 @@ function cotizar(paqueteId, adultos, ninos) {
   if (personas < p.min) return { error: `${p.nombre} sale desde ${p.min} persona(s)` };
   if (personas > p.max) return { error: `${p.nombre} admite hasta ${p.max} personas` };
 
-  const total = adultos * p.adulto + ninos * p.nino;
+  const base = adultos * p.adulto + ninos * p.nino;
+  const fotos = conFotos === true ? EXTRA_FOTOS : 0;
+  const total = base + fotos;
 
   /* Se redondea el DESCUENTO y el precio final se saca restando, igual que
      en booking.js del sitio. Si se hiciera al revés los dos podrían
@@ -161,7 +169,7 @@ function cotizar(paqueteId, adultos, ninos) {
   const descuento = Math.round(total * DESCUENTO_CONTADO);
 
   return {
-    nombre: p.nombre, adultos, ninos, total,
+    nombre: p.nombre, adultos, ninos, base, fotos, total,
     anticipo: Math.round(total * ANTICIPO),
     descuento,
     totalContado: total - descuento
@@ -181,10 +189,13 @@ const ANTICIPOS_VALIDOS = (() => {
     for (let a = 0; a <= p.max; a++) {
       for (let n = 0; a + n <= p.max; n++) {
         if (a + n < p.min) continue;
-        const total = a * p.adulto + n * p.nino;
-        set.add(Math.round(total * ANTICIPO));                    // solo el anticipo
-        set.add(total - Math.round(total * DESCUENTO_CONTADO));   // todo, con descuento
-        set.add(total);                                           // todo, sin descuento
+        const base = a * p.adulto + n * p.nino;
+        // Con fotos y sin fotos: son dos totales distintos y los dos valen.
+        for (const total of [base, base + EXTRA_FOTOS]) {
+          set.add(Math.round(total * ANTICIPO));                   // solo el anticipo
+          set.add(total - Math.round(total * DESCUENTO_CONTADO));  // todo, con descuento
+          set.add(total);                                          // todo, sin descuento
+        }
       }
     }
   }
@@ -208,13 +219,13 @@ async function getAccessToken() {
 
 // 2. Ruta para crear una orden (cuando el cliente hace clic en "Pagar")
 app.post('/api/crear-orden', async (req, res) => {
-  const { paquete, adultos, ninos, pagoCompleto, total, descripcion } = req.body;
+  const { paquete, adultos, ninos, pagoCompleto, conFotos, total, descripcion } = req.body;
 
   let monto, detalle;
 
   if (paquete) {
     // Camino normal: el servidor calcula el precio. El navegador no decide.
-    const c = cotizar(paquete, adultos, ninos);
+    const c = cotizar(paquete, adultos, ninos, conFotos);
     if (c.error) {
       console.warn('Reserva rechazada:', c.error, req.body);
       return res.status(400).json({ error: c.error });
@@ -228,7 +239,8 @@ app.post('/api/crear-orden', async (req, res) => {
     detalle = (todo
       ? `Pago completo (${Math.round(DESCUENTO_CONTADO * 100)}% dto., ahorra $${c.descuento})`
       : 'Anticipo 40%') +
-      ` — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
+      ` — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)` +
+      (c.fotos ? ` + fotos ($${c.fotos})` : '');
 
     // Si el sitio mandó también su propia cuenta y no coincide, es que las
     // dos tablas de precios se desincronizaron. Se cobra la del servidor,
