@@ -64,6 +64,7 @@ async function enviarCorreoReserva(reserva, captureData) {
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">💳 Datos del pago</p>
       <table style="width:100%;border-collapse:collapse;">
         ${fila(reserva.pagoCompleto ? 'PAGÓ TODO por adelantado' : 'Anticipo pagado (40%)', monto)}
+        ${reserva.pagoCompleto ? fila('Descuento aplicado', (reserva.descuento || '') + ' (pago por adelantado)') : ''}
         ${fila('Resto por cobrar el día del tour',
                reserva.pagoCompleto ? 'Nada — ya está liquidado' : reserva.resto)}
         ${fila('Estado', pago.status || captureData.status)}
@@ -111,6 +112,12 @@ async function enviarCorreoReserva(reserva, captureData) {
    ═══════════════════════════════════════════════════════════════════════════ */
 const ANTICIPO = 0.4;
 
+/* Descuento a quien paga el 100% al reservar, en vez de solo el anticipo.
+   0.05 = 5%. Una pareja pasa de $1,780 a $1,691.
+   TIENE QUE SER EL MISMO NÚMERO que DESCUENTO_CONTADO en booking.js del
+   sitio. Si no coinciden, el servidor avisa en los registros de Render. */
+const DESCUENTO_CONTADO = 0.05;
+
 /* Las tres opciones de tour (tour, familia, grupo6) cobran EXACTAMENTE lo
    mismo. Son la misma salida: lo único que cambia en la página es con
    cuántas personas arranca el formulario. Por eso tienen precios idénticos
@@ -146,9 +153,18 @@ function cotizar(paqueteId, adultos, ninos) {
   if (personas > p.max) return { error: `${p.nombre} admite hasta ${p.max} personas` };
 
   const total = adultos * p.adulto + ninos * p.nino;
+
+  /* Se redondea el DESCUENTO y el precio final se saca restando, igual que
+     en booking.js del sitio. Si se hiciera al revés los dos podrían
+     diferir en un peso y el cliente vería un número en la página y otro
+     en PayPal. */
+  const descuento = Math.round(total * DESCUENTO_CONTADO);
+
   return {
     nombre: p.nombre, adultos, ninos, total,
-    anticipo: Math.round(total * ANTICIPO)
+    anticipo: Math.round(total * ANTICIPO),
+    descuento,
+    totalContado: total - descuento
   };
 }
 
@@ -166,8 +182,9 @@ const ANTICIPOS_VALIDOS = (() => {
       for (let n = 0; a + n <= p.max; n++) {
         if (a + n < p.min) continue;
         const total = a * p.adulto + n * p.nino;
-        set.add(Math.round(total * ANTICIPO));   // pagó solo el anticipo
-        set.add(total);                          // pagó todo de una vez
+        set.add(Math.round(total * ANTICIPO));                    // solo el anticipo
+        set.add(total - Math.round(total * DESCUENTO_CONTADO));   // todo, con descuento
+        set.add(total);                                           // todo, sin descuento
       }
     }
   }
@@ -207,9 +224,11 @@ app.post('/api/crear-orden', async (req, res) => {
        lo único que decide: CUÁL de los dos montos, nunca cuánto valen.
        Los dos los calcula el servidor con su propia tabla. */
     const todo = pagoCompleto === true;
-    monto = todo ? c.total : c.anticipo;
-    detalle = `${todo ? 'Pago completo' : 'Anticipo 40%'} — ${c.nombre} · ` +
-              `${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
+    monto = todo ? c.totalContado : c.anticipo;
+    detalle = (todo
+      ? `Pago completo (${Math.round(DESCUENTO_CONTADO * 100)}% dto., ahorra $${c.descuento})`
+      : 'Anticipo 40%') +
+      ` — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)`;
 
     // Si el sitio mandó también su propia cuenta y no coincide, es que las
     // dos tablas de precios se desincronizaron. Se cobra la del servidor,
