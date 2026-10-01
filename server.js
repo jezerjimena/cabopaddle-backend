@@ -110,18 +110,27 @@ async function enviarCorreoReserva(reserva, captureData) {
    ═══════════════════════════════════════════════════════════════════════════ */
 const ANTICIPO = 0.4;
 
+/* Las tres opciones de tour (tour, familia, grupo6) cobran EXACTAMENTE lo
+   mismo. Son la misma salida: lo único que cambia en la página es con
+   cuántas personas arranca el formulario. Por eso tienen precios idénticos
+   aquí — si alguna vez se separan, deja de ser un solo precio. */
+const TOUR = { adulto: 890, nino: 500, min: 2, max: 10 };
+const BIENESTAR = { adulto: 990, nino: 500, min: 1, max: 8 };
+
 const PAQUETES = {
-  tour:       { adulto: 890, nino: 500, min: 2, max: 10, nombre: 'Tour Privado al Arco' },
-  yoga:       { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Yoga en Paddle' },
-  meditacion: { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Meditación Guiada' },
-  tarot:      { adulto: 990, nino: 500, min: 1, max: 8,  nombre: 'Tarot a la Orilla' }
+  tour:       { ...TOUR, nombre: 'Tour Privado al Arco' },
+  familia:    { ...TOUR, nombre: 'Tour Privado al Arco (en familia)' },
+  grupo6:     { ...TOUR, nombre: 'Tour Privado al Arco (entre amigos)' },
+  yoga:       { ...BIENESTAR, nombre: 'Yoga en Paddle' },
+  meditacion: { ...BIENESTAR, nombre: 'Meditación Guiada' },
+  tarot:      { ...BIENESTAR, nombre: 'Tarot a la Orilla' }
 };
 
 // Nombres de planes que ya no existen, por si alguien reserva desde un
 // enlace viejo que todavía ande circulando por WhatsApp.
 const ALIAS = {
   esencial: 'tour', pareja: 'tour', amigos: 'tour',
-  completa: 'tour', familiar: 'tour'
+  completa: 'tour', familiar: 'familia'
 };
 
 function cotizar(paqueteId, adultos, ninos) {
