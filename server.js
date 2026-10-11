@@ -45,7 +45,7 @@ async function enviarCorreoReserva(reserva, captureData) {
   const c = cotizar(reserva.paquete, reserva.adultos, reserva.ninos, reserva.conFotos === true);
   const cuenta = c.error ? null : c;
   const cobrado = pago.amount ? Math.round(Number(pago.amount.value)) : null;
-  const esperado = cuenta ? (reserva.pagoCompleto ? cuenta.totalContado : cuenta.anticipo) : null;
+  const esperado = cuenta ? cuenta.total : null;
   const avisoMonto = (cuenta && cobrado !== null && cobrado !== esperado)
     ? `<p style="margin:14px 26px 0;padding:10px 14px;background:#FBEDEC;color:#B4453C;border-radius:8px;font-size:13px;">⚠️ <strong>Revisa este cobro:</strong> se cobraron $${cobrado} y por las reglas de precio debían ser $${esperado}.</p>`
     : '';
@@ -76,10 +76,8 @@ async function enviarCorreoReserva(reserva, captureData) {
 
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">💳 Datos del pago</p>
       <table style="width:100%;border-collapse:collapse;">
-        ${fila(reserva.pagoCompleto ? 'PAGÓ TODO por adelantado' : 'Anticipo pagado (40%)', monto)}
-        ${reserva.pagoCompleto ? fila('Descuento aplicado', (reserva.descuento || '') + ' (pago por adelantado)') : ''}
-        ${fila('Resto por cobrar el día del tour',
-               reserva.pagoCompleto ? 'Nada — ya está liquidado' : reserva.resto)}
+        ${fila('Total pagado en línea', monto)}
+        ${fila('Saldo por cobrar el día del tour', 'Nada — ya está pagado completo')}
         ${fila('Estado', pago.status || captureData.status)}
         ${fila('ID de transacción', pago.id)}
         ${fila('Pagador (PayPal)', nombrePagador)}
@@ -88,6 +86,10 @@ async function enviarCorreoReserva(reserva, captureData) {
       ${avisoMonto}
 
       <div style="margin:18px 26px;padding:14px 16px;background:#F4EBDC;border-radius:10px;">
+        <p style="margin:0 0 8px;color:#16323D;font-size:13px;line-height:1.6;">
+          📌 <strong>Política:</strong> si cancela con 48 horas o más de anticipación, devuélvele todo desde PayPal;
+          con menos tiempo no hay reembolso, pero puedes reagendar su salida para otro día.
+        </p>
         <p style="margin:0;color:#16323D;font-size:13px;line-height:1.6;">
           💡 <strong>Recuerda enviarle al cliente:</strong> ${reserva.conFotos === true
             ? 'las fotos del recorrido por WhatsApp (ya las pagó),'
@@ -118,7 +120,7 @@ async function enviarCorreoReserva(reserva, captureData) {
    Antes el navegador le decía al servidor cuánto cobrar y el servidor le
    creía. Eso significaba que cualquiera con un poco de conocimiento podía
    abrir las herramientas del navegador y apartar una salida de $11,000
-   pagando un anticipo de $1 peso.
+   pagando $1 peso.
 
    Ahora el precio lo calcula el servidor. El navegador solo dice QUÉ se
    reserva y CUÁNTOS van; el monto lo pone esta tabla.
@@ -127,12 +129,10 @@ async function enviarCorreoReserva(reserva, captureData) {
    archivos en dos servidores distintos y tienen que coincidir. Si se
    desincronizan, el servidor lo avisa en los registros de Render.
    ═══════════════════════════════════════════════════════════════════════════ */
-const ANTICIPO = 0.4;
-
-/* Descuento a quien paga el 100% al reservar, en vez de solo el anticipo.
-   0.05 = 5%. TIENE QUE SER EL MISMO NÚMERO que DESCUENTO_CONTADO en
-   booking.js. */
-const DESCUENTO_CONTADO = 0.05;
+/* En la página el cliente paga SIEMPRE el total de la reserva. No hay
+   anticipo ni descuento por pago completo (se quitaron el 10 de octubre de
+   2026). Política: con 48 horas o más de anticipación se devuelve todo; con
+   menos, se puede reagendar para otro día. */
 
 /* Extra opcional: todas las fotos del recorrido. Se cobra POR SALIDA, una
    sola vez, lleven dos personas o lleven diez. Mismo número que
@@ -208,28 +208,18 @@ function cotizar(paqueteId, adultos, ninos, conFotos) {
   const fotos = (conFotos === true && p.fotosExtra) ? EXTRA_FOTOS : 0;
   const total = tour + fotos;
 
-  /* Se redondea el DESCUENTO y el precio final se saca restando, igual que
-     en booking.js del sitio. Si se hiciera al revés los dos podrían
-     diferir en un peso y el cliente vería un número en la página y otro
-     en PayPal. */
-  const descuento = Math.round(total * DESCUENTO_CONTADO);
-
   return {
-    nombre: p.nombre, adultos, ninos, bruto, tipoDesc, descPaquete, tour, fotos, total,
-    anticipo: Math.round(total * ANTICIPO),
-    descuento,
-    totalContado: total - descuento
+    nombre: p.nombre, esTour: p.fotosExtra === true,
+    adultos, ninos, bruto, tipoDesc, descPaquete, tour, fotos, total
   };
 }
 
-/* Todos los montos que pueden salir legítimamente de las reglas de arriba:
-   el anticipo del 40%, el pago completo con descuento y el total sin
-   descuento, con y sin fotos, para cada combinación posible de personas.
-   Se arma llamando a cotizar(), así que si cambias una regla se actualiza
-   sola. Sirve para las páginas que quedaron guardadas en el navegador de
-   alguien y todavía mandan el total ya calculado: si el número que llega no
-   está en esta lista, es que lo manipularon y se rechaza. */
-const ANTICIPOS_VALIDOS = (() => {
+/* Todos los totales que pueden salir legítimamente de las reglas de arriba,
+   con y sin fotos, para cada combinación posible de personas. Se arma
+   llamando a cotizar(), así que si cambias una regla se actualiza sola.
+   Sirve para revisar, antes de capturar un pago, que la orden de PayPal vale
+   algo que de verdad puede salir de las reglas. */
+const MONTOS_VALIDOS = (() => {
   const set = new Set();
   for (const id of Object.keys(PAQUETES)) {
     const p = PAQUETES[id];
@@ -238,8 +228,6 @@ const ANTICIPOS_VALIDOS = (() => {
         if (a + n < p.min) continue;
         for (const conFotos of [false, true]) {
           const c = cotizar(id, a, n, conFotos);
-          set.add(c.anticipo);
-          set.add(c.totalContado);
           set.add(c.total);
         }
       }
@@ -265,48 +253,41 @@ async function getAccessToken() {
 
 // 2. Ruta para crear una orden (cuando el cliente hace clic en "Pagar")
 app.post('/api/crear-orden', async (req, res) => {
-  const { paquete, adultos, ninos, pagoCompleto, conFotos, total, descripcion } = req.body;
+  const { paquete, adultos, ninos, conFotos, total } = req.body;
 
-  let monto, detalle;
-
-  if (paquete) {
-    // Camino normal: el servidor calcula el precio. El navegador no decide.
-    const c = cotizar(paquete, adultos, ninos, conFotos);
-    if (c.error) {
-      console.warn('Reserva rechazada:', c.error, req.body);
-      return res.status(400).json({ error: c.error });
-    }
-
-    /* El cliente elige en la página si paga todo o solo el anticipo. Eso es
-       lo único que decide: CUÁL de los dos montos, nunca cuánto valen.
-       Los dos los calcula el servidor con su propia tabla. */
-    const todo = pagoCompleto === true;
-    monto = todo ? c.totalContado : c.anticipo;
-    detalle = (todo
-      ? `Pago completo (${Math.round(DESCUENTO_CONTADO * 100)}% dto., ahorra $${c.descuento})`
-      : 'Anticipo 40%') +
-      ` — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)` +
-      (c.descPaquete ? ` · desc. ${c.tipoDesc} -$${c.descPaquete}` : '') +
-      (c.fotos ? ` + fotos ($${c.fotos})` : '');
-
-    // Si el sitio mandó también su propia cuenta y no coincide, es que las
-    // dos tablas de precios se desincronizaron. Se cobra la del servidor,
-    // pero queda el aviso en los registros de Render para corregirlo.
-    if (typeof total === 'number' && Math.round(total) !== monto) {
-      console.warn(`PRECIOS DESINCRONIZADOS: el sitio dice ${total} y el servidor ${monto} ` +
-                   `(${todo ? 'pago completo' : 'anticipo'}). ` +
-                   `Revisa que booking.js y server.js tengan los mismos precios.`);
-    }
-  } else if (typeof total === 'number' && ANTICIPOS_VALIDOS.has(Math.round(total))) {
-    // Camino de respaldo: alguien tiene la página vieja guardada en su
-    // navegador y todavía manda el total ya hecho. Se acepta solo si ese
-    // número de verdad puede salir de la tabla de precios.
-    monto = Math.round(total);
-    detalle = descripcion || 'Anticipo 40% — cabopaddle';
-  } else {
-    console.warn('Intento de orden con datos inválidos:', req.body);
+  if (!paquete) {
+    console.warn('Intento de orden sin paquete:', req.body);
     return res.status(400).json({ error: 'Datos de la reserva no válidos' });
   }
+
+  // El servidor calcula el precio. El navegador no decide.
+  const c = cotizar(paquete, adultos, ninos, conFotos);
+  if (c.error) {
+    console.warn('Reserva rechazada:', c.error, req.body);
+    return res.status(400).json({ error: c.error });
+  }
+  const monto = c.total;
+
+  /* Si la página mandó el total que le mostró al cliente y NO coincide con el
+     del servidor, NO SE COBRA. Puede pasar si el cliente tenía abierta una
+     versión vieja de la página (por ejemplo una que todavía ofrecía el
+     anticipo del 40%) o si booking.js y server.js quedaron con precios
+     distintos. Cobrar un monto diferente al que el cliente vio sería cobrarle
+     de más o de menos: mejor pedirle que recargue. */
+  if (typeof total !== 'number' || Math.round(total) !== monto) {
+    console.warn(`PRECIO DISTINTO AL MOSTRADO: la página dice ${total} y el servidor ${monto}. ` +
+                 `Si pasa seguido, revisa que booking.js y server.js tengan los mismos precios.`);
+    return res.status(409).json({
+      error: 'El precio de tu reserva cambió. Recarga la página para ver el precio actual.',
+      recargar: true
+    });
+  }
+
+  const pl = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`;
+  const detalle = `${c.nombre} — ${pl(c.adultos, 'adulto', 'adultos')}` +
+    (c.ninos ? ` + ${c.esTour ? pl(c.ninos, 'menor de 7 años', 'menores de 7 años') : pl(c.ninos, 'niño', 'niños')}` : '') +
+    (c.descPaquete ? ` · descuento ${c.tipoDesc} -$${c.descPaquete}` : '') +
+    (c.fotos ? ` + fotos ($${c.fotos})` : '');
 
   try {
     const accessToken = await getAccessToken();
@@ -350,7 +331,7 @@ app.post('/api/capturar-orden', async (req, res) => {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
     const valorOrden = Math.round(Number(orden.data?.purchase_units?.[0]?.amount?.value));
-    if (!ANTICIPOS_VALIDOS.has(valorOrden)) {
+    if (!MONTOS_VALIDOS.has(valorOrden)) {
       console.warn(`Captura rechazada: la orden ${orderID} vale ${valorOrden}, ` +
                    `que no corresponde a ninguna reserva posible.`);
       return res.status(400).json({ error: 'El monto de la orden no es válido' });
