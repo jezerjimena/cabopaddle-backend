@@ -40,6 +40,16 @@ async function enviarCorreoReserva(reserva, captureData) {
   const pagador = (captureData || {}).payer || {};
   const nombrePagador = [((pagador.name || {}).given_name), ((pagador.name || {}).surname)].filter(Boolean).join(' ');
 
+  /* El correo muestra las cuentas que hace el SERVIDOR, no las que mando el
+     navegador, y avisa si lo que se cobró no coincide con ellas. */
+  const c = cotizar(reserva.paquete, reserva.adultos, reserva.ninos, reserva.conFotos === true);
+  const cuenta = c.error ? null : c;
+  const cobrado = pago.amount ? Math.round(Number(pago.amount.value)) : null;
+  const esperado = cuenta ? (reserva.pagoCompleto ? cuenta.totalContado : cuenta.anticipo) : null;
+  const avisoMonto = (cuenta && cobrado !== null && cobrado !== esperado)
+    ? `<p style="margin:14px 26px 0;padding:10px 14px;background:#FBEDEC;color:#B4453C;border-radius:8px;font-size:13px;">⚠️ <strong>Revisa este cobro:</strong> se cobraron $${cobrado} y por las reglas de precio debían ser $${esperado}.</p>`
+    : '';
+
   const html = `
   <div style="font-family:Arial,Helvetica,sans-serif;background:#FBF7F0;padding:24px;">
     <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #eee;">
@@ -53,13 +63,15 @@ async function enviarCorreoReserva(reserva, captureData) {
         ${fila('Experiencia', reserva.tour)}
         ${fila('Fecha', reserva.fecha)}
         ${fila('Hora', reserva.hora)}
-        ${fila('Adultos', reserva.adultos)}
-        ${fila('Niños (6-12)', reserva.ninos)}
+        ${fila(reserva.etiquetaAdultos || 'Adultos', reserva.adultos)}
+        ${fila(reserva.etiquetaNinos || 'Niños', reserva.ninos)}
         ${fila('Cliente', reserva.nombre)}
         ${fila('Correo del cliente', reserva.email)}
         ${fila('Teléfono / WhatsApp', reserva.telefono)}
-        ${fila('Total del tour', reserva.total)}
-        ${fila('Fotos del recorrido', reserva.fotos || 'No las pidió')}
+        ${cuenta ? fila('Precio del tour (sin descuentos)', `$${cuenta.bruto} MXN`) : ''}
+        ${cuenta && cuenta.descPaquete ? fila(`Descuento ${cuenta.tipoDesc}`, `-$${cuenta.descPaquete} MXN`) : ''}
+        ${cuenta ? fila('Fotos del recorrido', cuenta.fotos ? `Sí · $${cuenta.fotos} MXN` : 'No las pidió') : fila('Fotos del recorrido', reserva.fotos || 'No las pidió')}
+        ${fila('Total de la reserva', cuenta ? `$${cuenta.total} MXN` : reserva.total)}
       </table>
 
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">💳 Datos del pago</p>
@@ -73,10 +85,14 @@ async function enviarCorreoReserva(reserva, captureData) {
         ${fila('Pagador (PayPal)', nombrePagador)}
         ${fila('Correo PayPal', pagador.email_address)}
       </table>
+      ${avisoMonto}
 
       <div style="margin:18px 26px;padding:14px 16px;background:#F4EBDC;border-radius:10px;">
         <p style="margin:0;color:#16323D;font-size:13px;line-height:1.6;">
-          💡 <strong>Recuerda enviarle al cliente:</strong> las fotos del tour por WhatsApp, el enlace para dejar reseña en Google,
+          💡 <strong>Recuerda enviarle al cliente:</strong> ${reserva.conFotos === true
+            ? 'las fotos del recorrido por WhatsApp (ya las pagó),'
+            : 'ofrécele las fotos por $' + EXTRA_FOTOS + ' al terminar (no las pidió),'}
+          el enlace para dejar reseña en Google,
           y este mensaje de recompra: <em>"¿Vuelves a Cabo? Tu próximo tour con 20% off — guarda este correo."</em>
         </p>
       </div>
@@ -101,7 +117,7 @@ async function enviarCorreoReserva(reserva, captureData) {
    ───────────────────────────────────────────────────────────────────────────
    Antes el navegador le decía al servidor cuánto cobrar y el servidor le
    creía. Eso significaba que cualquiera con un poco de conocimiento podía
-   abrir las herramientas del navegador y apartar una salida de $8,900
+   abrir las herramientas del navegador y apartar una salida de $11,000
    pagando un anticipo de $1 peso.
 
    Ahora el precio lo calcula el servidor. El navegador solo dice QUÉ se
@@ -114,22 +130,35 @@ async function enviarCorreoReserva(reserva, captureData) {
 const ANTICIPO = 0.4;
 
 /* Descuento a quien paga el 100% al reservar, en vez de solo el anticipo.
-   0.05 = 5%. Una pareja pasa de $1,780 a $1,691.
-   TIENE QUE SER EL MISMO NÚMERO que DESCUENTO_CONTADO en booking.js del
-   sitio. Si no coinciden, el servidor avisa en los registros de Render. */
+   0.05 = 5%. TIENE QUE SER EL MISMO NÚMERO que DESCUENTO_CONTADO en
+   booking.js. */
 const DESCUENTO_CONTADO = 0.05;
 
-/* Extra opcional: las fotos del recorrido. Se cobra POR SALIDA, una sola
-   vez, lleven dos personas o lleven diez. Tiene que ser el mismo numero
-   que EXTRAS.fotos.mxn en booking.js del sitio. */
-const EXTRA_FOTOS = 100;
+/* Extra opcional: todas las fotos del recorrido. Se cobra POR SALIDA, una
+   sola vez, lleven dos personas o lleven diez. Mismo número que
+   EXTRAS.fotos.mxn en booking.js. No le aplican los descuentos de familia
+   ni de grupo. */
+const EXTRA_FOTOS = 200;
 
-/* Las tres opciones de tour (tour, familia, grupo6) cobran EXACTAMENTE lo
-   mismo. Son la misma salida: lo único que cambia en la página es con
-   cuántas personas arranca el formulario. Por eso tienen precios idénticos
-   aquí — si alguna vez se separan, deja de ser un solo precio. */
-const TOUR = { adulto: 890, nino: 500, min: 2, max: 10 };
-const BIENESTAR = { adulto: 990, nino: 500, min: 1, max: 8 };
+/* Tarifas del tour. Mismas que PRECIO_ADULTO, PRECIO_MENOR y DESCUENTOS en
+   booking.js:
+     · PRECIO_ADULTO lo paga cada adulto y cada niño de 7 años en adelante.
+     · PRECIO_MENOR lo pagan los menores de 7 años: el 50%.
+     · Familia: exactamente 2 adultos + 2 menores de 7 años, 15% menos.
+     · Grupo: 6 personas o más, 20% menos sobre el total.
+   Los descuentos no se suman: aplica uno solo. */
+const PRECIO_ADULTO = 1100;
+const PRECIO_MENOR = 550;
+const DESCUENTOS = {
+  familia: { pct: 0.15, adultos: 2, ninos: 2 },
+  grupo:   { pct: 0.20, desde: 6 }
+};
+
+/* Las tres opciones de tour (tour, familia, grupo6) son la misma salida con
+   la misma tarifa: cambia solo el descuento que les toca por tamaño. */
+const TOUR = { adulto: PRECIO_ADULTO, nino: PRECIO_MENOR, min: 2, max: 10, descuentos: true, fotosExtra: true };
+// Yoga, meditación y tarot ya incluyen las fotos del momento: no llevan el extra.
+const BIENESTAR = { adulto: 990, nino: 500, min: 1, max: 8, descuentos: false, fotosExtra: false };
 
 const PAQUETES = {
   tour:       { ...TOUR, nombre: 'Tour Privado al Arco' },
@@ -155,12 +184,29 @@ function cotizar(paqueteId, adultos, ninos, conFotos) {
   ninos = parseInt(ninos, 10) || 0;
   const personas = adultos + ninos;
 
-  if (personas < p.min) return { error: `${p.nombre} sale desde ${p.min} persona(s)` };
+  // Los niños nunca van solos.
+  if (adultos < 1) return { error: 'Cada salida necesita al menos 1 adulto' };
+  if (personas < p.min) {
+    return { error: `${p.nombre} sale desde ${p.min} ${p.min === 1 ? 'persona' : 'personas'}` };
+  }
   if (personas > p.max) return { error: `${p.nombre} admite hasta ${p.max} personas` };
 
-  const base = adultos * p.adulto + ninos * p.nino;
-  const fotos = conFotos === true ? EXTRA_FOTOS : 0;
-  const total = base + fotos;
+  const bruto = adultos * p.adulto + ninos * p.nino;
+
+  // Un solo descuento a la vez; el de familia solo para la combinación exacta.
+  let tipoDesc = '', pct = 0;
+  if (p.descuentos) {
+    if (adultos === DESCUENTOS.familia.adultos && ninos === DESCUENTOS.familia.ninos) {
+      tipoDesc = 'familia'; pct = DESCUENTOS.familia.pct;
+    } else if (personas >= DESCUENTOS.grupo.desde) {
+      tipoDesc = 'grupo'; pct = DESCUENTOS.grupo.pct;
+    }
+  }
+  const descPaquete = Math.round(bruto * pct);
+  const tour = bruto - descPaquete;
+
+  const fotos = (conFotos === true && p.fotosExtra) ? EXTRA_FOTOS : 0;
+  const total = tour + fotos;
 
   /* Se redondea el DESCUENTO y el precio final se saca restando, igual que
      en booking.js del sitio. Si se hiciera al revés los dos podrían
@@ -169,32 +215,32 @@ function cotizar(paqueteId, adultos, ninos, conFotos) {
   const descuento = Math.round(total * DESCUENTO_CONTADO);
 
   return {
-    nombre: p.nombre, adultos, ninos, base, fotos, total,
+    nombre: p.nombre, adultos, ninos, bruto, tipoDesc, descPaquete, tour, fotos, total,
     anticipo: Math.round(total * ANTICIPO),
     descuento,
     totalContado: total - descuento
   };
 }
 
-/* Todos los montos que pueden salir legítimamente de la tabla de arriba:
-   tanto los anticipos del 40% como los pagos completos, porque el cliente
-   puede elegir cualquiera de los dos en la página de reservas.
-   Sirve para las páginas que quedaron guardadas en el navegador de alguien
-   y todavía mandan el total ya calculado: si el número que llega no está en
-   esta lista, es que lo manipularon y se rechaza. */
+/* Todos los montos que pueden salir legítimamente de las reglas de arriba:
+   el anticipo del 40%, el pago completo con descuento y el total sin
+   descuento, con y sin fotos, para cada combinación posible de personas.
+   Se arma llamando a cotizar(), así que si cambias una regla se actualiza
+   sola. Sirve para las páginas que quedaron guardadas en el navegador de
+   alguien y todavía mandan el total ya calculado: si el número que llega no
+   está en esta lista, es que lo manipularon y se rechaza. */
 const ANTICIPOS_VALIDOS = (() => {
   const set = new Set();
   for (const id of Object.keys(PAQUETES)) {
     const p = PAQUETES[id];
-    for (let a = 0; a <= p.max; a++) {
+    for (let a = 1; a <= p.max; a++) {
       for (let n = 0; a + n <= p.max; n++) {
         if (a + n < p.min) continue;
-        const base = a * p.adulto + n * p.nino;
-        // Con fotos y sin fotos: son dos totales distintos y los dos valen.
-        for (const total of [base, base + EXTRA_FOTOS]) {
-          set.add(Math.round(total * ANTICIPO));                   // solo el anticipo
-          set.add(total - Math.round(total * DESCUENTO_CONTADO));  // todo, con descuento
-          set.add(total);                                          // todo, sin descuento
+        for (const conFotos of [false, true]) {
+          const c = cotizar(id, a, n, conFotos);
+          set.add(c.anticipo);
+          set.add(c.totalContado);
+          set.add(c.total);
         }
       }
     }
@@ -240,6 +286,7 @@ app.post('/api/crear-orden', async (req, res) => {
       ? `Pago completo (${Math.round(DESCUENTO_CONTADO * 100)}% dto., ahorra $${c.descuento})`
       : 'Anticipo 40%') +
       ` — ${c.nombre} · ${c.adultos} adulto(s) + ${c.ninos} niño(s)` +
+      (c.descPaquete ? ` · desc. ${c.tipoDesc} -$${c.descPaquete}` : '') +
       (c.fotos ? ` + fotos ($${c.fotos})` : '');
 
     // Si el sitio mandó también su propia cuenta y no coincide, es que las
