@@ -21,15 +21,53 @@ const EMAIL_DESTINO = process.env.EMAIL_DESTINO || EMAIL_USER;
 const transporter = (EMAIL_USER && EMAIL_APP_PASSWORD)
   ? nodemailer.createTransport({
       service: 'gmail',
-      auth: { user: EMAIL_USER, pass: EMAIL_APP_PASSWORD }
+      auth: { user: EMAIL_USER, pass: EMAIL_APP_PASSWORD },
+      // Si Gmail no contesta, se corta en segundos en vez de quedarse colgado.
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 20000
     })
   : null;
+
+// ── Ayudas para el correo ────────────────────────────────────────
+/* TODO lo que escribe el cliente (nombre, correo, teléfono, etiquetas...) se
+   "escapa" antes de meterlo al HTML del correo: así un nombre con símbolos
+   raros se ve como texto y nunca como un enlace o un formato metido a la
+   fuerza en tu bandeja. */
+function esc(v) {
+  return String(v === undefined || v === null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Para el asunto: una sola línea, sin caracteres de control y no demasiado larga.
+function lineaSegura(v, max) {
+  return String(v === undefined || v === null ? '' : v).replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max || 80);
+}
+
+// Solo se usa como "responder a" si de verdad parece un correo.
+function correoValido(v) {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  return s.length <= 120 && /^[^\s@<>",;]+@[^\s@<>",;]+\.[^\s@<>",;]+$/.test(s) ? s : undefined;
+}
+
+// "2026-10-20" -> "martes, 20 de octubre de 2026". Si no es una fecha real, se deja tal cual.
+function fechaLarga(iso, corta) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return lineaSegura(iso, 40);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if (isNaN(d.getTime()) || d.getUTCMonth() !== +m[2] - 1) return lineaSegura(iso, 40);
+  return d.toLocaleDateString('es-MX', corta
+    ? { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }
+    : { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
 
 function fila(etiqueta, valor) {
   if (valor === undefined || valor === null || valor === '') return '';
   return `<tr>
-    <td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#4C6470;font-size:14px;">${etiqueta}</td>
-    <td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#16323D;font-weight:bold;font-size:14px;text-align:right;">${valor}</td>
+    <td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#4C6470;font-size:14px;">${esc(etiqueta)}</td>
+    <td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#16323D;font-weight:bold;font-size:14px;text-align:right;">${esc(valor)}</td>
   </tr>`;
 }
 
@@ -61,8 +99,8 @@ async function enviarCorreoReserva(reserva, captureData) {
       <p style="margin:18px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">📋 Datos de la reserva</p>
       <table style="width:100%;border-collapse:collapse;">
         ${fila('Experiencia', reserva.tour)}
-        ${fila('Fecha', reserva.fecha)}
-        ${fila('Hora', reserva.hora)}
+        ${fila('Fecha', fechaLarga(reserva.fecha))}
+        ${fila('Hora', reserva.horaTexto || reserva.hora)}
         ${fila(reserva.etiquetaAdultos || 'Adultos', reserva.adultos)}
         ${fila(reserva.etiquetaNinos || 'Niños', reserva.ninos)}
         ${fila('Cliente', reserva.nombre)}
@@ -108,10 +146,38 @@ async function enviarCorreoReserva(reserva, captureData) {
   await transporter.sendMail({
     from: `"Cabo Paddle Web" <${EMAIL_USER}>`,
     to: EMAIL_DESTINO,
-    replyTo: reserva.email || undefined,
-    subject: `🌊 Nueva reserva pagada — ${reserva.nombre || nombrePagador || 'Cliente'}${reserva.fecha ? ' · ' + reserva.fecha : ''}`,
+    replyTo: correoValido(reserva.email),
+    subject: `🌊 Nueva reserva pagada — ${lineaSegura(reserva.nombre || nombrePagador || 'Cliente', 60)}${reserva.fecha ? ' · ' + fechaLarga(reserva.fecha, true) : ''}`,
     html
   });
+}
+
+/* Manda el correo DESPUÉS de haberle contestado al cliente (así su pantalla de
+   "pago recibido" no espera a Gmail) y lo reintenta si Gmail falla un momento.
+   Si de plano no se logra, deja en los registros de Render una línea con los
+   datos de la reserva para que no se pierda. */
+async function notificarReserva(reserva, captureData) {
+  if (!transporter) {
+    console.warn('EMAIL_USER / EMAIL_APP_PASSWORD no configurados: no se envió el correo de notificación.');
+    return;
+  }
+  const esperas = [0, 2000, 6000];
+  for (let i = 0; i < esperas.length; i++) {
+    if (esperas[i]) await new Promise(r => setTimeout(r, esperas[i]));
+    try {
+      await enviarCorreoReserva(reserva, captureData);
+      console.log('Correo de reserva enviado a', EMAIL_DESTINO, `(intento ${i + 1})`);
+      return;
+    } catch (e) {
+      console.error(`Falló el envío del correo (intento ${i + 1} de ${esperas.length}):`, e.message);
+    }
+  }
+  const cap = ((((captureData || {}).purchase_units || [])[0] || {}).payments || {}).captures || [];
+  console.error('RESERVA SIN CORREO — el pago SÍ se cobró; revisa PayPal y confirma por WhatsApp:', JSON.stringify({
+    transaccion: (cap[0] || {}).id, cliente: reserva.nombre, telefono: reserva.telefono, correo: reserva.email,
+    fecha: reserva.fecha, hora: reserva.horaTexto || reserva.hora, experiencia: reserva.tour,
+    adultos: reserva.adultos, ninos: reserva.ninos, total: reserva.total
+  }));
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -348,24 +414,19 @@ app.post('/api/capturar-orden', async (req, res) => {
 
     console.log('Pago exitoso:', capture.data.id);
 
-    // Enviar correo con los datos de la reserva (sin bloquear la respuesta al cliente)
-    if (transporter) {
-      try {
-        await enviarCorreoReserva(reserva || {}, capture.data);
-        console.log('Correo de reserva enviado a', EMAIL_DESTINO);
-      } catch (e) {
-        console.error('El pago se capturó pero falló el envío del correo:', e.message);
-      }
-    } else {
-      console.warn('EMAIL_USER / EMAIL_APP_PASSWORD no configurados: no se envió el correo de notificación.');
-    }
-
     res.json({ success: true, data: capture.data });
+
+    // El correo con los datos de la reserva se manda después de contestar.
+    notificarReserva(reserva || {}, capture.data)
+      .catch(e => console.error('Error inesperado al notificar la reserva:', e));
   } catch (error) {
     console.error('Error capturando orden:', error.response?.data || error);
     res.status(500).json({ error: 'Error al capturar el pago' });
   }
 });
+
+// Responde "ok" y la versión: sirve para comprobar que Render ya tiene el código nuevo.
+app.get('/salud', (req, res) => res.json({ ok: true, version: '2026-10-26-correos', correo: !!transporter }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
