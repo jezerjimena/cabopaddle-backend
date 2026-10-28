@@ -496,7 +496,7 @@ app.post('/api/capturar-orden', async (req, res) => {
 // aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-29-resend-final', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
+  const base = { ok: true, version: '2026-10-29-seguro', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
   if (req.query.correo !== '1' || RESEND_API_KEY || !transporter) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
