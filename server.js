@@ -61,12 +61,12 @@ function correoValido(v) {
 }
 
 // "2026-10-20" -> "martes, 20 de octubre de 2026". Si no es una fecha real, se deja tal cual.
-function fechaLarga(iso, corta) {
+function fechaLarga(iso, corta, idioma) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
   if (!m) return lineaSegura(iso, 40);
   const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
   if (isNaN(d.getTime()) || d.getUTCMonth() !== +m[2] - 1) return lineaSegura(iso, 40);
-  return d.toLocaleDateString('es-MX', corta
+  return d.toLocaleDateString(idioma === 'en' ? 'en-US' : 'es-MX', corta
     ? { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }
     : { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
@@ -199,11 +199,138 @@ async function enviarCorreoReserva(reserva, captureData) {
   });
 }
 
+/* ═══ Correo de confirmación para el CLIENTE ═══
+   Le llega a quien reservó, en su idioma, con el resumen, el punto de encuentro
+   y la política. NO promete descuentos (el sitio no tiene forma de aplicarlos).
+   Las respuestas a este correo le llegan al negocio (reply_to). */
+function esIngles(reserva) {
+  if (reserva.idioma === 'en') return true;
+  if (reserva.idioma === 'es') return false;
+  return /\bper person\b|\bchildren\b|\badults\b|^(Private|As a family|With friends|Paddle Board|Guided|Beachside)/i
+    .test(`${reserva.tour || ''} ${reserva.etiquetaAdultos || ''}`);
+}
+
+const URL_MAPA = 'https://www.google.com/maps?q=Playa+El+Corsario,+Cabo+San+Lucas';
+const URL_WHATSAPP = 'https://wa.me/526244070845';
+const URL_SITIO = 'https://cabopaddle.com.mx';
+
+const TEXTOS_CLIENTE = {
+  es: {
+    asunto: 'Pago recibido — cabopaddle', titulo: '¡Pago recibido!', sub: 'cabopaddle · Cabo San Lucas',
+    hola: (n) => `Hola ${n},`, intro: 'Gracias por reservar con nosotros. Ya tenemos tu pago y estamos revisando la disponibilidad de esa salida.',
+    resumen: 'Tu reserva', exp: 'Experiencia', fecha: 'Fecha', hora: 'Horario', personas: 'Personas', fotos: 'Fotos del recorrido',
+    fotosSi: 'Incluidas', fotosNo: 'No incluidas', total: 'Total pagado', ref: 'Referencia de pago',
+    sigTitulo: 'Qué sigue',
+    pasos: ['Te escribimos por WhatsApp <strong>en menos de 1 hora</strong> para confirmar tu fecha y horario.', 'Te mandamos el punto de encuentro exacto con ubicación.', 'Llegas <strong>15 minutos antes</strong>, con traje de baño puesto.'],
+    puntoTitulo: 'Punto de encuentro', mapa: 'Ver en Google Maps',
+    politicaTitulo: 'Cancelaciones y cambios',
+    politica: ['Si cancelas con <strong>48 horas o más</strong> de anticipación, te devolvemos tu dinero.', 'Con menos tiempo no hay reembolso, pero <strong>reagendamos tu salida para otro día</strong>, según disponibilidad.', 'Si esa salida ya estuviera ocupada, te ofrecemos otro horario o te devolvemos el 100% de lo que pagaste.'],
+    dudas: '¿Dudas o cambios? Responde a este correo o escríbenos por WhatsApp:', auto: 'Este correo es una confirmación automática de tu pago.',
+    adulto: ['adulto', 'adultos'], menor: ['menor de 7 años', 'menores de 7 años'], nino: ['niño', 'niños']
+  },
+  en: {
+    asunto: 'Payment received — cabopaddle', titulo: 'Payment received!', sub: 'cabopaddle · Cabo San Lucas',
+    hola: (n) => `Hi ${n},`, intro: "Thank you for booking with us. We have your payment and we're checking availability for that departure.",
+    resumen: 'Your booking', exp: 'Experience', fecha: 'Date', hora: 'Time', personas: 'Group', fotos: 'Tour photos',
+    fotosSi: 'Included', fotosNo: 'Not included', total: 'Total paid', ref: 'Payment reference',
+    sigTitulo: 'What happens next',
+    pasos: ["We message you on WhatsApp <strong>within 1 hour</strong> to confirm your date and time.", 'We send you the exact meeting point with a map pin.', 'You arrive <strong>15 minutes early</strong>, swimsuit already on.'],
+    puntoTitulo: 'Meeting point', mapa: 'Open in Google Maps',
+    politicaTitulo: 'Cancellations & changes',
+    politica: ['If you cancel <strong>48 hours or more</strong> ahead, we refund your money.', 'With less notice there is no refund, but <strong>we reschedule your departure for another day</strong>, subject to availability.', 'If that departure is already taken, we offer you another time or refund 100% of what you paid.'],
+    dudas: 'Questions or changes? Reply to this email or message us on WhatsApp:', auto: 'This is an automatic confirmation of your payment.',
+    adulto: ['adult', 'adults'], menor: ['child under 7', 'children under 7'], nino: ['child', 'children']
+  }
+};
+
+async function enviarCorreoCliente(reserva, captureData) {
+  const para = correoValido(reserva.email);
+  if (!para) return { via: 'omitido', motivo: 'sin correo válido del cliente' };
+  const idioma = esIngles(reserva) ? 'en' : 'es';
+  const T = TEXTOS_CLIENTE[idioma];
+  const captura = (((captureData || {}).purchase_units || [])[0] || {});
+  const pago = (((captura.payments || {}).captures || [])[0] || {});
+  const c = cotizar(reserva.paquete, reserva.adultos, reserva.ninos, reserva.conFotos === true);
+  const cuenta = c.error ? null : c;
+  const monto = pago.amount ? `$${Number(pago.amount.value).toLocaleString('en-US', { maximumFractionDigits: 2 })} MXN`
+    : (cuenta ? `$${cuenta.total.toLocaleString('en-US')} MXN` : '');
+  const plural = (n, par) => `${n} ${Number(n) === 1 ? par[0] : par[1]}`;
+  const gente = cuenta
+    ? plural(cuenta.adultos, T.adulto) + (cuenta.ninos ? ` + ${plural(cuenta.ninos, cuenta.esTour ? T.menor : T.nino)}` : '')
+    : '';
+  const nombre = lineaSegura(reserva.nombre, 40) || (idioma === 'en' ? 'there' : '');
+  const fila2 = (a, b) => b ? `<tr><td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#4C6470;font-size:14px;">${esc(a)}</td><td style="padding:9px 16px;border-bottom:1px solid #f0ece4;color:#16323D;font-weight:bold;font-size:14px;text-align:right;">${esc(b)}</td></tr>` : '';
+  const lista = (arr) => arr.map(x => `<li style="margin:0 0 6px;">${x}</li>`).join('');
+  const html = `
+  <div style="font-family:Arial,Helvetica,sans-serif;background:#FBF7F0;padding:24px;">
+    <div style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #eee;">
+      <div style="background:#16323D;padding:22px 26px;">
+        <h1 style="margin:0;color:#ffffff;font-size:22px;">🌊 ${esc(T.titulo)}</h1>
+        <p style="margin:6px 0 0;color:#8FBAC9;font-size:13px;">${esc(T.sub)}</p>
+      </div>
+      <p style="margin:20px 26px 4px;color:#16323D;font-size:15px;line-height:1.6;"><strong>${esc(T.hola(nombre))}</strong></p>
+      <p style="margin:0 26px 14px;color:#16323D;font-size:15px;line-height:1.6;">${esc(T.intro)}</p>
+      <p style="margin:14px 26px 6px;color:#16323D;font-size:15px;font-weight:bold;">${esc(T.resumen)}</p>
+      <table style="width:100%;border-collapse:collapse;">
+        ${fila2(T.exp, reserva.nombrePaquete || (cuenta && cuenta.nombre) || '')}
+        ${fila2(T.fecha, fechaLarga(reserva.fecha, false, idioma))}
+        ${fila2(T.hora, reserva.horaTexto || reserva.hora)}
+        ${fila2(T.personas, gente)}
+        ${cuenta && cuenta.esTour ? fila2(T.fotos, cuenta.fotos ? T.fotosSi : T.fotosNo) : ''}
+        ${fila2(T.total, monto)}
+        ${fila2(T.ref, pago.id)}
+      </table>
+      <div style="margin:18px 26px 0;padding:14px 16px;background:#F4EBDC;border-radius:10px;">
+        <p style="margin:0 0 8px;color:#16323D;font-size:14px;font-weight:bold;">${esc(T.sigTitulo)}</p>
+        <ol style="margin:0;padding-left:20px;color:#16323D;font-size:14px;line-height:1.6;">${lista(T.pasos)}</ol>
+      </div>
+      <div style="margin:14px 26px 0;">
+        <p style="margin:0 0 4px;color:#16323D;font-size:14px;font-weight:bold;">📍 ${esc(T.puntoTitulo)}</p>
+        <p style="margin:0;color:#16323D;font-size:14px;line-height:1.6;">Playa El Corsario, Cabo San Lucas, B.C.S. · <a href="${URL_MAPA}" style="color:#1F6F8B;">${esc(T.mapa)}</a></p>
+      </div>
+      <div style="margin:14px 26px 0;">
+        <p style="margin:0 0 4px;color:#16323D;font-size:14px;font-weight:bold;">${esc(T.politicaTitulo)}</p>
+        <ul style="margin:0;padding-left:20px;color:#16323D;font-size:13px;line-height:1.6;">${lista(T.politica)}</ul>
+      </div>
+      <p style="margin:18px 26px 6px;color:#16323D;font-size:14px;line-height:1.6;">${esc(T.dudas)} <a href="${URL_WHATSAPP}" style="color:#1F6F8B;font-weight:bold;">+52 624 407 0845</a></p>
+      <p style="margin:6px 26px 24px;color:#8CA0A6;font-size:12px;line-height:1.6;">${esc(T.auto)} · <a href="${URL_SITIO}" style="color:#8CA0A6;">cabopaddle.com.mx</a></p>
+    </div>
+  </div>`;
+  return enviarMail({
+    to: para,
+    replyTo: EMAIL_DESTINO,
+    subject: `${T.asunto}${reserva.fecha ? ' · ' + fechaLarga(reserva.fecha, true, idioma) : ''}`,
+    html,
+    clave: pago.id ? `cliente-${pago.id}` : undefined
+  });
+}
+
 /* Manda el correo DESPUÉS de haberle contestado al cliente (así su pantalla de
-   "pago recibido" no espera a Gmail) y lo reintenta si Gmail falla un momento.
-   Si de plano no se logra, deja en los registros de Render una línea con los
-   datos de la reserva para que no se pierda. */
+   "pago recibido" no espera) y lo reintenta si falla un momento. Primero el
+   aviso al negocio (lo importante) y después la confirmación al cliente; si uno
+   falla, el otro se manda igual. Si el aviso al negocio no se logra, deja en los
+   registros de Render una línea con los datos de la reserva para que no se pierda. */
 async function notificarReserva(reserva, captureData) {
+  if (!RESEND_API_KEY && !transporter) return avisarAlNegocio(reserva, captureData);
+  await avisarAlNegocio(reserva, captureData);
+  await avisarAlCliente(reserva, captureData);
+}
+
+async function avisarAlCliente(reserva, captureData) {
+  for (let i = 0; i < 2; i++) {
+    if (i) await new Promise(r => setTimeout(r, 3000));
+    try {
+      const r = await enviarCorreoCliente(reserva, captureData);
+      if (r && r.via === 'omitido') console.warn('No se mandó confirmación al cliente:', r.motivo);
+      else console.log('Confirmación enviada al cliente (', (r && r.via) || '?', ')');
+      return;
+    } catch (e) {
+      console.error(`Falló la confirmación al cliente (intento ${i + 1} de 2):`, e.message);
+    }
+  }
+}
+
+async function avisarAlNegocio(reserva, captureData) {
   if (!RESEND_API_KEY && !transporter) {
     console.error('RESERVA SIN CORREO — no hay servicio de correo configurado (falta RESEND_API_KEY) y el pago SÍ se cobró:', JSON.stringify({
       cliente: reserva.nombre, telefono: reserva.telefono, correo: reserva.email, fecha: reserva.fecha,
@@ -492,19 +619,34 @@ app.post('/api/capturar-orden', async (req, res) => {
 });
 
 // Responde "ok" y la versión: sirve para comprobar que Render ya tiene el código nuevo.
-// Con ?correo=1 además le pregunta a Gmail si acepta el usuario y la contraseña de
-// aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
+// Con ?correo=1 además revisa (SIN mandar ningún correo, máximo una vez por minuto) que el
+// servicio de correo acepte las credenciales que tiene ESTE servidor:
+//  · Resend: manda una petición incompleta a propósito; si la clave es buena, Resend contesta
+//    "faltan datos" (422); si la clave es mala, contesta 401/403.
+//  · Gmail (respaldo): intenta iniciar sesión por SMTP.
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-29-seguro', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
-  if (req.query.correo !== '1' || RESEND_API_KEY || !transporter) return res.json(base);
+  const base = { ok: true, version: '2026-10-30-cliente', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
+  if (req.query.correo !== '1' || !(RESEND_API_KEY || transporter)) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
     try {
-      await transporter.verify();
-      ultimaVerificacion.r = { smtp: 'ok' };
+      if (RESEND_API_KEY) {
+        const r = await axios({
+          url: 'https://api.resend.com/emails', method: 'post', timeout: 15000, validateStatus: () => true,
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          data: { from: EMAIL_REMITENTE }
+        });
+        const buena = r.status === 422 || r.status === 400;
+        ultimaVerificacion.r = buena
+          ? { clave: 'valida' }
+          : { clave: 'RECHAZADA', codigo: r.status, detalle: String((r.data && (r.data.message || r.data.name)) || '').slice(0, 160) };
+      } else {
+        await transporter.verify();
+        ultimaVerificacion.r = { smtp: 'ok' };
+      }
     } catch (e) {
-      ultimaVerificacion.r = { smtp: 'error', codigo: e.code || '', detalle: String(e.message || '').slice(0, 160) };
+      ultimaVerificacion.r = { error: 'no se pudo comprobar', codigo: e.code || '', detalle: String(e.message || '').slice(0, 160) };
     }
   }
   res.json({ ...base, ...ultimaVerificacion.r });
