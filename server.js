@@ -180,7 +180,7 @@ async function enviarCorreoReserva(reserva, captureData) {
             ? 'las fotos del recorrido por WhatsApp (ya las pagó),'
             : 'ofrécele las fotos por $' + EXTRA_FOTOS + ' al terminar (no las pidió),'}
           el enlace para dejar reseña en Google,
-          y este mensaje de recompra: <em>"¿Vuelves a Cabo? Tu próximo tour con 20% off — guarda este correo."</em>
+          y este mensaje de recompra: <em>"¿Vuelves a Cabo? Tu próximo tour con 10% off — guarda este correo."</em>
         </p>
       </div>
       <p style="margin:18px 26px 24px;color:#8CA0A6;font-size:12px;line-height:1.6;">
@@ -626,7 +626,7 @@ app.post('/api/capturar-orden', async (req, res) => {
 //  · Gmail (respaldo): intenta iniciar sesión por SMTP.
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-30-cliente', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
+  const base = { ok: true, version: '2026-10-30-diez', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
   if (req.query.correo !== '1' || !(RESEND_API_KEY || transporter)) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
