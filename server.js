@@ -63,6 +63,15 @@ function fechaLarga(iso, corta) {
     : { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 
+// "2026-10-20" -> "20 oct 2026" (compacta, para la descripción del pago).
+function fechaCorta(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return lineaSegura(iso, 20);
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if (isNaN(d.getTime()) || d.getUTCMonth() !== +m[2] - 1) return lineaSegura(iso, 20);
+  return d.toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/\./g, '');
+}
+
 function fila(etiqueta, valor) {
   if (valor === undefined || valor === null || valor === '') return '';
   return `<tr>
@@ -319,7 +328,7 @@ async function getAccessToken() {
 
 // 2. Ruta para crear una orden (cuando el cliente hace clic en "Pagar")
 app.post('/api/crear-orden', async (req, res) => {
-  const { paquete, adultos, ninos, conFotos, total } = req.body;
+  const { paquete, adultos, ninos, conFotos, total, fecha, horaTexto, nombre, telefono, email } = req.body;
 
   if (!paquete) {
     console.warn('Intento de orden sin paquete:', req.body);
@@ -355,6 +364,21 @@ app.post('/api/crear-orden', async (req, res) => {
     (c.descPaquete ? ` · descuento ${c.tipoDesc} -$${c.descPaquete}` : '') +
     (c.fotos ? ` + fotos ($${c.fotos})` : '');
 
+  /* Los datos de la reserva viajan también DENTRO del pago de PayPal. El correo
+     de "Ha recibido un pago" que te manda PayPal trae esta descripción, así que
+     aunque el correo del servidor falle, ahí ves qué reservó, cuándo, quién y su
+     teléfono. PayPal acepta máximo 127 caracteres en la descripción. */
+  const quien = [
+    lineaSegura(nombre, 22), lineaSegura(telefono, 18)
+  ].filter(Boolean).join(' · ');
+  const cuando = [fechaCorta(fecha), lineaSegura(horaTexto, 10)].filter(Boolean).join(' ');
+  const descripcion = [
+    `${c.nombre} ${pl(c.adultos, 'adulto', 'adultos')}` + (c.ninos ? ` + ${c.ninos} ${c.esTour ? 'menor(es)' : 'niño(s)'}` : ''),
+    cuando, quien
+  ].filter(Boolean).join(' · ').slice(0, 127);
+  // El detalle completo (descuentos, fotos) y el correo del cliente van en "custom_id" (hasta 255).
+  const idPersonalizado = [detalle, lineaSegura(email, 80)].filter(Boolean).join(' | ').slice(0, 255);
+
   try {
     const accessToken = await getAccessToken();
     const order = await axios({
@@ -367,7 +391,8 @@ app.post('/api/crear-orden', async (req, res) => {
       data: {
         intent: 'CAPTURE',
         purchase_units: [{
-          description: detalle,
+          description: descripcion || detalle.slice(0, 127),
+          custom_id: idPersonalizado,
           amount: {
             currency_code: 'MXN',
             value: monto.toFixed(2)
@@ -430,7 +455,7 @@ app.post('/api/capturar-orden', async (req, res) => {
 // aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-28-diagnostico', correo: !!transporter };
+  const base = { ok: true, version: '2026-10-28-descripcion', correo: !!transporter };
   if (req.query.correo !== '1' || !transporter) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
