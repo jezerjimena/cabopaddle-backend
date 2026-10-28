@@ -16,7 +16,15 @@ const PAYPAL_API = 'https://api-m.paypal.com';
 const EMAIL_USER = process.env.EMAIL_USER;
 // Se eliminan espacios por si la contraseña de aplicación se pegó como "xxxx xxxx xxxx xxxx"
 const EMAIL_APP_PASSWORD = (process.env.EMAIL_APP_PASSWORD || '').replace(/\s+/g, '') || undefined;
-const EMAIL_DESTINO = process.env.EMAIL_DESTINO || EMAIL_USER;
+const EMAIL_DESTINO = process.env.EMAIL_DESTINO || EMAIL_USER || 'cabopaddle@gmail.com';
+
+/* Render GRATIS bloquea las conexiones SMTP (puertos 25, 465 y 587), así que el
+   correo por Gmail desde aquí nunca sale. Por eso el correo se manda con la API
+   de Resend, que funciona por internet normal (HTTPS). Para activarlo basta la
+   variable RESEND_API_KEY en Render. Si no existe, se intenta Gmail (SMTP), que
+   solo funciona en un plan de pago de Render o en tu computadora. */
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim() || undefined;
+const EMAIL_REMITENTE = process.env.EMAIL_REMITENTE || 'Cabo Paddle <reservas@cabopaddle.com.mx>';
 
 const transporter = (EMAIL_USER && EMAIL_APP_PASSWORD)
   ? nodemailer.createTransport({
@@ -70,6 +78,36 @@ function fechaCorta(iso) {
   const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
   if (isNaN(d.getTime()) || d.getUTCMonth() !== +m[2] - 1) return lineaSegura(iso, 20);
   return d.toLocaleDateString('es-MX', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(/\./g, '');
+}
+
+/* Un solo lugar para mandar correos: por Resend si hay clave; si no, por Gmail.
+   "clave" evita que un reintento mande el mismo correo dos veces (Resend la
+   recuerda 24 horas). Si algo falla, lanza un error con el motivo. */
+async function enviarMail({ to, subject, html, replyTo, clave }) {
+  if (RESEND_API_KEY) {
+    try {
+      const r = await axios({
+        url: 'https://api.resend.com/emails',
+        method: 'post',
+        timeout: 15000,
+        headers: Object.assign({
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        }, clave ? { 'Idempotency-Key': clave } : {}),
+        data: Object.assign({ from: EMAIL_REMITENTE, to: [to], subject, html }, replyTo ? { reply_to: replyTo } : {})
+      });
+      return { via: 'resend', id: r.data && r.data.id };
+    } catch (e) {
+      const d = e.response && e.response.data;
+      const motivo = d && d.message ? `${d.name ? d.name + ': ' : ''}${d.message}` : e.message;
+      throw new Error(`Resend (${(e.response && e.response.status) || 'sin respuesta'}): ${motivo}`);
+    }
+  }
+  if (transporter) {
+    await transporter.sendMail({ from: `"Cabo Paddle Web" <${EMAIL_USER}>`, to, replyTo, subject, html });
+    return { via: 'smtp' };
+  }
+  throw new Error('No hay ningún servicio de correo configurado (falta RESEND_API_KEY)');
 }
 
 function fila(etiqueta, valor) {
@@ -152,12 +190,12 @@ async function enviarCorreoReserva(reserva, captureData) {
     </div>
   </div>`;
 
-  await transporter.sendMail({
-    from: `"Cabo Paddle Web" <${EMAIL_USER}>`,
+  return enviarMail({
     to: EMAIL_DESTINO,
     replyTo: correoValido(reserva.email),
     subject: `🌊 Nueva reserva pagada — ${lineaSegura(reserva.nombre || nombrePagador || 'Cliente', 60)}${reserva.fecha ? ' · ' + fechaLarga(reserva.fecha, true) : ''}`,
-    html
+    html,
+    clave: pago.id ? `reserva-${pago.id}` : undefined
   });
 }
 
@@ -166,16 +204,19 @@ async function enviarCorreoReserva(reserva, captureData) {
    Si de plano no se logra, deja en los registros de Render una línea con los
    datos de la reserva para que no se pierda. */
 async function notificarReserva(reserva, captureData) {
-  if (!transporter) {
-    console.warn('EMAIL_USER / EMAIL_APP_PASSWORD no configurados: no se envió el correo de notificación.');
+  if (!RESEND_API_KEY && !transporter) {
+    console.error('RESERVA SIN CORREO — no hay servicio de correo configurado (falta RESEND_API_KEY) y el pago SÍ se cobró:', JSON.stringify({
+      cliente: reserva.nombre, telefono: reserva.telefono, correo: reserva.email, fecha: reserva.fecha,
+      hora: reserva.horaTexto || reserva.hora, experiencia: reserva.tour, total: reserva.total
+    }));
     return;
   }
   const esperas = [0, 2000, 6000];
   for (let i = 0; i < esperas.length; i++) {
     if (esperas[i]) await new Promise(r => setTimeout(r, esperas[i]));
     try {
-      await enviarCorreoReserva(reserva, captureData);
-      console.log('Correo de reserva enviado a', EMAIL_DESTINO, `(intento ${i + 1})`);
+      const r = await enviarCorreoReserva(reserva, captureData);
+      console.log('Correo de reserva enviado a', EMAIL_DESTINO, `(intento ${i + 1}, vía ${(r && r.via) || '?'})`);
       return;
     } catch (e) {
       console.error(`Falló el envío del correo (intento ${i + 1} de ${esperas.length}):`, e.message);
@@ -455,8 +496,8 @@ app.post('/api/capturar-orden', async (req, res) => {
 // aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-28-descripcion', correo: !!transporter };
-  if (req.query.correo !== '1' || !transporter) return res.json(base);
+  const base = { ok: true, version: '2026-10-29-resend', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
+  if (req.query.correo !== '1' || RESEND_API_KEY || !transporter) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
     try {
@@ -467,6 +508,26 @@ app.get('/salud', async (req, res) => {
     }
   }
   res.json({ ...base, ...ultimaVerificacion.r });
+});
+
+/* PRUEBA TEMPORAL (se quita después de comprobar el correo): manda UN correo de
+   prueba, solo a EMAIL_DESTINO, desde este mismo servidor, para saber de verdad
+   si el correo sale de Render. Máximo uno cada 5 minutos. */
+let ultimaPrueba = 0;
+app.get('/prueba-correo', async (req, res) => {
+  if (Date.now() - ultimaPrueba < 5 * 60 * 1000) return res.status(429).json({ ok: false, error: 'Espera unos minutos entre pruebas' });
+  ultimaPrueba = Date.now();
+  try {
+    const r = await enviarMail({
+      to: EMAIL_DESTINO,
+      subject: '🧪 PRUEBA — el correo de reservas sale desde Render',
+      html: '<p style="font-family:Arial,sans-serif">Si estás leyendo esto, el servidor de pagos <strong>sí puede mandarte correos</strong>.<br>Enviado: ' + new Date().toISOString() + '</p>'
+    });
+    res.json({ ok: true, via: r.via, id: r.id || null, destino: EMAIL_DESTINO.replace(/(.{3}).*(@.*)/, '$1***$2') });
+  } catch (e) {
+    console.error('Falló la prueba de correo:', e.message);
+    res.status(502).json({ ok: false, error: String(e.message).slice(0, 200) });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
