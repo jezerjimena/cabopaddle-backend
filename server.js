@@ -496,7 +496,7 @@ app.post('/api/capturar-orden', async (req, res) => {
 // aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
 let ultimaVerificacion = { t: 0, r: null };
 app.get('/salud', async (req, res) => {
-  const base = { ok: true, version: '2026-10-29-resend', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
+  const base = { ok: true, version: '2026-10-29-resend-final', correo: !!(RESEND_API_KEY || transporter), via: RESEND_API_KEY ? 'resend' : (transporter ? 'smtp' : null) };
   if (req.query.correo !== '1' || RESEND_API_KEY || !transporter) return res.json(base);
   if (Date.now() - ultimaVerificacion.t > 60000) {
     ultimaVerificacion.t = Date.now();
@@ -508,26 +508,6 @@ app.get('/salud', async (req, res) => {
     }
   }
   res.json({ ...base, ...ultimaVerificacion.r });
-});
-
-/* PRUEBA TEMPORAL (se quita después de comprobar el correo): manda UN correo de
-   prueba, solo a EMAIL_DESTINO, desde este mismo servidor, para saber de verdad
-   si el correo sale de Render. Máximo uno cada 5 minutos. */
-let ultimaPrueba = 0;
-app.get('/prueba-correo', async (req, res) => {
-  if (Date.now() - ultimaPrueba < 5 * 60 * 1000) return res.status(429).json({ ok: false, error: 'Espera unos minutos entre pruebas' });
-  ultimaPrueba = Date.now();
-  try {
-    const r = await enviarMail({
-      to: EMAIL_DESTINO,
-      subject: '🧪 PRUEBA — el correo de reservas sale desde Render',
-      html: '<p style="font-family:Arial,sans-serif">Si estás leyendo esto, el servidor de pagos <strong>sí puede mandarte correos</strong>.<br>Enviado: ' + new Date().toISOString() + '</p>'
-    });
-    res.json({ ok: true, via: r.via, id: r.id || null, destino: EMAIL_DESTINO.replace(/(.{3}).*(@.*)/, '$1***$2') });
-  } catch (e) {
-    console.error('Falló la prueba de correo:', e.message);
-    res.status(502).json({ ok: false, error: String(e.message).slice(0, 200) });
-  }
 });
 
 const PORT = process.env.PORT || 3000;
