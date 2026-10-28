@@ -426,7 +426,23 @@ app.post('/api/capturar-orden', async (req, res) => {
 });
 
 // Responde "ok" y la versión: sirve para comprobar que Render ya tiene el código nuevo.
-app.get('/salud', (req, res) => res.json({ ok: true, version: '2026-10-26-correos', correo: !!transporter }));
+// Con ?correo=1 además le pregunta a Gmail si acepta el usuario y la contraseña de
+// aplicación que tiene ESTE servidor (no manda ningún correo; máximo una vez por minuto).
+let ultimaVerificacion = { t: 0, r: null };
+app.get('/salud', async (req, res) => {
+  const base = { ok: true, version: '2026-10-28-diagnostico', correo: !!transporter };
+  if (req.query.correo !== '1' || !transporter) return res.json(base);
+  if (Date.now() - ultimaVerificacion.t > 60000) {
+    ultimaVerificacion.t = Date.now();
+    try {
+      await transporter.verify();
+      ultimaVerificacion.r = { smtp: 'ok' };
+    } catch (e) {
+      ultimaVerificacion.r = { smtp: 'error', codigo: e.code || '', detalle: String(e.message || '').slice(0, 160) };
+    }
+  }
+  res.json({ ...base, ...ultimaVerificacion.r });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
